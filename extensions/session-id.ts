@@ -1,23 +1,62 @@
 /**
  * Session ID extension for pi.
  *
- * Prepends the session ID (followed by the system prompt) to:
- *   1. The system prompt itself — so `{sessionId}` is the very first
- *      thing the LLM sees in every turn.
- *   2. Any compaction summary — so the session ID + system prompt
- *      survive compaction as the first message in the compressed
- *      context.
+ * Prepends the session ID to the system prompt and compaction summaries,
+ * and optionally appends a user-defined custom prompt (set via `/prompt`).
  *
- * This ensures the session identity is always visible at the top of
- * the LLM's context window, even after many rounds of compaction.
+ * Final prompt format:
+ *   {sessionId}
+ *
+ *   {systemPrompt}          ← pi's default system prompt
+ *
+ *   {customPrompt}          ← only when set via /prompt
+ *
+ * The custom prompt is persisted to ~/.pi/agent/custom-prompt.json.
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { readFile, writeFile, mkdir } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join, dirname } from "node:path";
+
+const PROMPT_FILE = join(homedir(), ".pi", "agent", "custom-prompt.json");
+
+// ── Helpers ─────────────────────────────────────────────────────
+
+async function loadCustomPrompt(): Promise<string | null> {
+  try {
+    const raw = await readFile(PROMPT_FILE, "utf-8");
+    const data = JSON.parse(raw);
+    return typeof data.customPrompt === "string" && data.customPrompt.trim()
+      ? data.customPrompt.trim()
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+async function saveCustomPrompt(prompt: string | null): Promise<void> {
+  await mkdir(dirname(PROMPT_FILE), { recursive: true });
+  await writeFile(
+    PROMPT_FILE,
+    JSON.stringify({ customPrompt: prompt ?? "" }, null, 2),
+    "utf-8",
+  );
+}
+
+function buildPrompt(sessionId: string, systemPrompt: string, customPrompt: string | null): string {
+  let result = `${sessionId}\n\n${systemPrompt}`;
+  if (customPrompt) {
+    result += `\n\n${customPrompt}`;
+  }
+  return result;
+}
+
+// ── Extension ───────────────────────────────────────────────────
 
 export default function (pi: ExtensionAPI) {
-  // Cached base system prompt (without the session-ID prefix we add).
-  let baseSystemPrompt = "";
   let sessionId = "";
+  let baseSystemPrompt = "";
 
   // ── Track session ID across session switches ──────────────────
   pi.on("session_start", async (_event, ctx) => {
@@ -25,39 +64,30 @@ export default function (pi: ExtensionAPI) {
     baseSystemPrompt = ctx.getSystemPrompt();
   });
 
-  // ── Prepend session ID to the system prompt on every turn ─────
+  // ── Build the full prompt on every turn ───────────────────────
   pi.on("before_agent_start", async (event, ctx) => {
     const id = ctx.sessionManager.getSessionId();
     if (!id) return;
 
     sessionId = id;
-    // Capture the current (un-prefixed) system prompt so the
-    // `context` handler can reconstruct it later.
     baseSystemPrompt = event.systemPrompt;
 
+    const custom = await loadCustomPrompt();
     return {
-      systemPrompt: `${id}\n\n${event.systemPrompt}`,
+      systemPrompt: buildPrompt(sessionId, baseSystemPrompt, custom),
     };
   });
 
-  // ── Also prepend session ID + system prompt to compaction ─────
-  // The `context` event fires before every LLM call with a deep
-  // copy of the messages.  We patch the first compactionSummary
-  // so the session ID + full system prompt appear as the very
-  // first content the LLM sees in the compacted context.
+  // ── Prepend session ID + system prompt to compaction summaries ─
   pi.on("context", async (event, ctx) => {
     if (!sessionId) return;
 
     const idx = event.messages.findIndex(
       (m) => m.role === "compactionSummary",
     );
-    if (idx === -1) return; // no compaction summary → nothing to do
+    if (idx === -1) return;
 
     const msg = event.messages[idx];
-
-    // Avoid double-prepending when this handler runs more than
-    // once for the same compaction entry (shouldn't happen with
-    // deep copies, but be safe).
     if (msg.summary.startsWith(sessionId)) return;
 
     const messages = event.messages.slice();
@@ -67,5 +97,37 @@ export default function (pi: ExtensionAPI) {
     };
 
     return { messages };
+  });
+
+  // ── /prompt command: view / set / clear custom prompt ─────────
+  pi.registerCommand("prompt", {
+    description:
+      "View, set, or clear the custom system prompt. " +
+      "Usage: /prompt <text>  |  /prompt  |  /prompt --clear",
+    handler: async (args, ctx) => {
+      const trimmed = args.trim();
+
+      // ── Clear ───────────────────────────────────────────────
+      if (trimmed === "--clear" || trimmed === "-d") {
+        await saveCustomPrompt(null);
+        ctx.ui.notify("Custom prompt cleared.", "info");
+        return;
+      }
+
+      // ── Show ────────────────────────────────────────────────
+      if (!trimmed) {
+        const current = await loadCustomPrompt();
+        if (current) {
+          ctx.ui.notify(`Current custom prompt:\n\n${current}`, "info");
+        } else {
+          ctx.ui.notify("No custom prompt set. Use /prompt <text> to set one.", "info");
+        }
+        return;
+      }
+
+      // ── Set ─────────────────────────────────────────────────
+      await saveCustomPrompt(trimmed);
+      ctx.ui.notify("Custom prompt saved. It will be appended to the system prompt on the next turn.", "info");
+    },
   });
 }

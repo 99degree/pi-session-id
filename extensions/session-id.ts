@@ -78,7 +78,7 @@ export default function (pi: ExtensionAPI) {
     };
   });
 
-  // ── Prepend session ID + system prompt to compaction summaries ─
+  // ── Prepend session ID + system prompt + custom prompt to compaction ─
   pi.on("context", async (event, ctx) => {
     if (!sessionId) return;
 
@@ -90,10 +90,11 @@ export default function (pi: ExtensionAPI) {
     const msg = event.messages[idx];
     if (msg.summary.startsWith(sessionId)) return;
 
+    const custom = await loadCustomPrompt();
     const messages = event.messages.slice();
     messages[idx] = {
       ...msg,
-      summary: `${sessionId}\n\n${baseSystemPrompt}\n\n${msg.summary}`,
+      summary: `${buildPrompt(sessionId, baseSystemPrompt, custom)}\n\n${msg.summary}`,
     };
 
     return { messages };

@@ -1,17 +1,16 @@
 /**
  * Session ID extension for pi.
  *
- * Prepends the session ID to the system prompt and compaction summaries,
- * and optionally appends a user-defined custom prompt (set via `/prompt`).
+ * Builds the LLM prompt from up to 4 elements:
+ *   1. {sessionId}        — always present
+ *   2. {systemPrompt}     — pi's default system prompt
+ *   3. {customPrompt}     — optional, set via /prompt
+ *   4. {claudeContent}    — optional, loaded via /claude from a CLAUDE.md file
  *
- * Final prompt format:
- *   {sessionId}
+ * The same 4-element header is prepended to compaction summaries so the
+ * full identity survives context compression.
  *
- *   {systemPrompt}          ← pi's default system prompt
- *
- *   {customPrompt}          ← only when set via /prompt
- *
- * The custom prompt is persisted to ~/.pi/agent/custom-prompt.json.
+ * Custom prompt data is persisted to ~/.pi/agent/custom-prompt.json.
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -19,35 +18,52 @@ import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, dirname, resolve, isAbsolute } from "node:path";
 
-const PROMPT_FILE = join(homedir(), ".pi", "agent", "custom-prompt.json");
+const STORE_FILE = join(homedir(), ".pi", "agent", "custom-prompt.json");
 
-// ── Helpers ─────────────────────────────────────────────────────
+// ── Storage helpers ─────────────────────────────────────────────
 
-async function loadCustomPrompt(): Promise<string | null> {
+interface PromptStore {
+  customPrompt: string;
+  claudeContent: string;
+}
+
+async function loadStore(): Promise<PromptStore> {
   try {
-    const raw = await readFile(PROMPT_FILE, "utf-8");
+    const raw = await readFile(STORE_FILE, "utf-8");
     const data = JSON.parse(raw);
-    return typeof data.customPrompt === "string" && data.customPrompt.trim()
-      ? data.customPrompt.trim()
-      : null;
+    return {
+      customPrompt:
+        typeof data.customPrompt === "string" ? data.customPrompt : "",
+      claudeContent:
+        typeof data.claudeContent === "string" ? data.claudeContent : "",
+    };
   } catch {
-    return null;
+    return { customPrompt: "", claudeContent: "" };
   }
 }
 
-async function saveCustomPrompt(prompt: string | null): Promise<void> {
-  await mkdir(dirname(PROMPT_FILE), { recursive: true });
-  await writeFile(
-    PROMPT_FILE,
-    JSON.stringify({ customPrompt: prompt ?? "" }, null, 2),
-    "utf-8",
-  );
+async function saveStore(store: PromptStore): Promise<void> {
+  await mkdir(dirname(STORE_FILE), { recursive: true });
+  await writeFile(STORE_FILE, JSON.stringify(store, null, 2), "utf-8");
 }
 
-function buildPrompt(sessionId: string, systemPrompt: string, customPrompt: string | null): string {
+// Non-empty helper
+const present = (s: string): s is string => s.trim().length > 0;
+
+// ── Prompt builder ──────────────────────────────────────────────
+
+function buildPrompt(
+  sessionId: string,
+  systemPrompt: string,
+  customPrompt: string,
+  claudeContent: string,
+): string {
   let result = `${sessionId}\n\n${systemPrompt}`;
-  if (customPrompt) {
+  if (present(customPrompt)) {
     result += `\n\n${customPrompt}`;
+  }
+  if (present(claudeContent)) {
+    result += `\n\n${claudeContent}`;
   }
   return result;
 }
@@ -64,7 +80,7 @@ export default function (pi: ExtensionAPI) {
     baseSystemPrompt = ctx.getSystemPrompt();
   });
 
-  // ── Build the full prompt on every turn ───────────────────────
+  // ── Build the full 4-element prompt on every turn ─────────────
   pi.on("before_agent_start", async (event, ctx) => {
     const id = ctx.sessionManager.getSessionId();
     if (!id) return;
@@ -72,13 +88,18 @@ export default function (pi: ExtensionAPI) {
     sessionId = id;
     baseSystemPrompt = event.systemPrompt;
 
-    const custom = await loadCustomPrompt();
+    const store = await loadStore();
     return {
-      systemPrompt: buildPrompt(sessionId, baseSystemPrompt, custom),
+      systemPrompt: buildPrompt(
+        sessionId,
+        baseSystemPrompt,
+        store.customPrompt,
+        store.claudeContent,
+      ),
     };
   });
 
-  // ── Prepend session ID + system prompt + custom prompt to compaction ─
+  // ── Prepend the 4-element header to compaction summaries ──────
   pi.on("context", async (event, ctx) => {
     if (!sessionId) return;
 
@@ -90,81 +111,79 @@ export default function (pi: ExtensionAPI) {
     const msg = event.messages[idx];
     if (msg.summary.startsWith(sessionId)) return;
 
-    const custom = await loadCustomPrompt();
+    const store = await loadStore();
     const messages = event.messages.slice();
     messages[idx] = {
       ...msg,
-      summary: `${buildPrompt(sessionId, baseSystemPrompt, custom)}\n\n${msg.summary}`,
+      summary: `${buildPrompt(sessionId, baseSystemPrompt, store.customPrompt, store.claudeContent)}\n\n${msg.summary}`,
     };
 
     return { messages };
   });
 
-  // ── /prompt command: view / set / clear custom prompt ─────────
+  // ── /prompt command: view / set / clear element 3 ─────────────
   pi.registerCommand("prompt", {
     description:
-      "View, set, or clear the custom system prompt. " +
+      "View, set, or clear the custom prompt (element 3). " +
       "Usage: /prompt <text>  |  /prompt  |  /prompt --clear",
     handler: async (args, ctx) => {
       const trimmed = args.trim();
 
-      // ── Clear ───────────────────────────────────────────────
       if (trimmed === "--clear" || trimmed === "-d") {
-        await saveCustomPrompt(null);
+        const store = await loadStore();
+        store.customPrompt = "";
+        await saveStore(store);
         ctx.ui.notify("Custom prompt cleared.", "info");
         return;
       }
 
-      // ── Show ────────────────────────────────────────────────
       if (!trimmed) {
-        const current = await loadCustomPrompt();
-        if (current) {
-          ctx.ui.notify(`Current custom prompt:\n\n${current}`, "info");
+        const store = await loadStore();
+        if (present(store.customPrompt)) {
+          ctx.ui.notify(`Custom prompt:\n\n${store.customPrompt}`, "info");
         } else {
           ctx.ui.notify("No custom prompt set. Use /prompt <text> to set one.", "info");
         }
         return;
       }
 
-      // ── Set ─────────────────────────────────────────────────
-      await saveCustomPrompt(trimmed);
-      ctx.ui.notify("Custom prompt saved. It will be appended to the system prompt on the next turn.", "info");
+      const store = await loadStore();
+      store.customPrompt = trimmed;
+      await saveStore(store);
+      ctx.ui.notify("Custom prompt saved (element 3).", "info");
     },
   });
 
-  // ── /claude command: load CLAUDE.md as custom prompt ─────────
+  // ── /claude command: load CLAUDE.md as element 4 ───────────────
   pi.registerCommand("claude", {
     description:
-      "Load a CLAUDE.md file as the custom prompt. " +
+      "Load a CLAUDE.md file as the 4th prompt element. " +
       "Usage: /claude          (loads ./CLAUDE.md)  |  " +
       "/claude <path>  (load a specific file)  |  " +
-      "/claude --clear (clear custom prompt)",
+      "/claude --clear (clear claude content)",
     handler: async (args, ctx) => {
       const trimmed = args.trim();
 
-      // ── Clear ───────────────────────────────────────────────
       if (trimmed === "--clear" || trimmed === "-d") {
-        await saveCustomPrompt(null);
-        ctx.ui.notify("Custom prompt cleared.", "info");
+        const store = await loadStore();
+        store.claudeContent = "";
+        await saveStore(store);
+        ctx.ui.notify("Claude content cleared.", "info");
         return;
       }
 
-      // ── Resolve file path ───────────────────────────────────
+      // Resolve file path
       const filePath = trimmed
         ? isAbsolute(trimmed)
           ? trimmed
           : resolve(ctx.cwd, trimmed)
         : resolve(ctx.cwd, "CLAUDE.md");
 
-      // ── Read file ───────────────────────────────────────────
       let content: string;
       try {
         content = await readFile(filePath, "utf-8");
       } catch {
-        ctx.ui.notify(
-          `Cannot read file: ${filePath}`,
-          "error",
-        );
+        ctx.ui.notify(`Cannot read file: ${filePath}`, "error");
         return;
       }
 
@@ -173,9 +192,11 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
-      await saveCustomPrompt(content.trim());
+      const store = await loadStore();
+      store.claudeContent = content.trim();
+      await saveStore(store);
       ctx.ui.notify(
-        `Loaded ${filePath} (${content.trim().split("\n").length} lines) as custom prompt.`,
+        `Loaded ${filePath} (${content.trim().split("\n").length} lines) as element 4.`,
         "info",
       );
     },

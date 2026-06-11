@@ -62,13 +62,15 @@ Once installed, the extension runs automatically. The user + assistant pair is i
 /prompt --clear      # clear
 ```
 
-### `/claude` — Load from a file
+### `/claude` — Load from a file (manual override)
 
 ```bash
 /claude              # loads ./CLAUDE.md
 /claude path/to/file.md
 /claude --clear      # clear
 ```
+
+**Auto-loading**: If no manual claude content is set via `/claude`, the extension will automatically load `./CLAUDE.md` from the current working directory (if present) and use it as the claude content. Manual overrides take precedence and persist until cleared.
 
 ## How it works
 

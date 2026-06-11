@@ -71,6 +71,28 @@ function buildAssistantContent(
 }
 
 /**
+ * Returns the effective claude content: the stored value if non-empty,
+ * otherwise attempts to auto-load CLAUDE.md from the given cwd.
+ */
+async function getEffectiveClaudeContent(
+  store: PromptStore,
+  cwd: string
+): Promise<string> {
+  if (present(store.claudeContent)) {
+    return store.claudeContent;
+  }
+  // Try to auto-load CLAUDE.md
+  const claudePath = resolve(cwd, "CLAUDE.md");
+  try {
+    const content = await readFile(claudePath, "utf-8");
+    return content.trim();
+  } catch {
+    // No CLAUDE.md or unreadable
+    return "";
+  }
+}
+
+/**
  * Check whether the first two messages in the array are already
  * our injected pair (empty user + assistant carrying sessionId).
  * This avoids stacking them on every turn.
@@ -118,12 +140,13 @@ export default function (pi: ExtensionAPI) {
     );
     if (compIdx !== -1) {
       const store = await loadStore();
+      const effectiveClaudeContent = await getEffectiveClaudeContent(store, ctx.cwd);
       const msgs = messages.slice();
       const comp = msgs[compIdx];
       if (!comp.summary.startsWith(sessionId)) {
         msgs[compIdx] = {
           ...comp,
-          summary: `${buildAssistantContent(sessionId, baseSystemPrompt, store.customPrompt, store.claudeContent)}\n\n${comp.summary}`,
+          summary: `${buildAssistantContent(sessionId, baseSystemPrompt, store.customPrompt, effectiveClaudeContent)}\n\n${comp.summary}`,
         };
       }
       
@@ -144,11 +167,12 @@ export default function (pi: ExtensionAPI) {
 
     // Normal turn: prepend empty user + session-info assistant.
     const store = await loadStore();
+    const effectiveClaudeContent = await getEffectiveClaudeContent(store, ctx.cwd);
     const info = buildAssistantContent(
       sessionId,
       baseSystemPrompt,
       store.customPrompt,
-      store.claudeContent,
+      effectiveClaudeContent,
     );
 
     return {

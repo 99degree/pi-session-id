@@ -1,6 +1,6 @@
 # pi-session-id
 
-Tiny [pi](https://github.com/earendil-works/pi-coding-agent) extension that injects a **user + assistant exchange** at the start of every LLM call to carry session identity and optional custom content.
+Tiny [pi](https://github.com/earendil-works/pi-coding-agent) extension that injects a **user + assistant exchange** at the start of every LLM call to carry session identity and optional custom content, and ensures valid message sequences after compaction.
 
 The system prompt itself is left untouched — pi's default is used.
 
@@ -17,7 +17,10 @@ user: (actual user message)
 ...
 ```
 
-After compaction, the same pair leads the compacted context.
+After compaction, the same pair leads the compacted context. If compaction would leave the first kept message as an assistant message or tool call, the extension:
+- Removes leading tool calls (they belong to summarized turns)
+- Inserts an empty user message before the first kept assistant message
+This ensures the message sequence remains valid for strict models.
 
 ## Install
 
@@ -72,7 +75,7 @@ Once installed, the extension runs automatically. The user + assistant pair is i
 | Hook | What it does |
 |------|-------------|
 | `session_start` | Captures session ID and base system prompt |
-| `context` | Prepends `user: ""` + `assistant: {info}` before every LLM call (checks to avoid duplication). For compaction summaries, wraps the info into the summary text instead. |
+| `context` | Prepends `user: ""` + `assistant: {info}` before every LLM call (checks to avoid duplication). For compaction summaries, wraps the info into the summary text and fixes the message sequence after the summary (removes leading tool calls, inserts empty user before assistant if needed). |
 
 Custom prompt data is persisted to `~/.pi/agent/custom-prompt.json`.
 

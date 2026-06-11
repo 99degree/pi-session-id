@@ -17,10 +17,10 @@ user: (actual user message)
 ...
 ```
 
-After compaction, the same pair leads the compacted context. If compaction would leave the first kept message as an assistant message or tool call, the extension:
+After compaction, the same pair leads the compacted context. If compaction would leave the first kept message as a non-user message (e.g., assistant or tool call), the extension:
 - Removes leading tool calls (they belong to summarized turns)
-- Inserts an empty user message before the first kept assistant message
-This ensures the message sequence remains valid for strict models.
+- Inserts an empty user message before the first remaining non-user message
+This ensures the message sequence starts with a user message after the compaction summary, keeping it valid for strict models.
 
 ## Install
 

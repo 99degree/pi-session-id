@@ -152,15 +152,15 @@ export default function (pi: ExtensionAPI) {
       
       // Fix message sequence after compactionSummary:
       // Remove leading tool calls (they belong to summarized turns)
-      // If first remaining is assistant, insert empty user before it
+      // Ensure the first remaining message is a user message
       let start = compIdx + 1;
       while (start < msgs.length && msgs[start].role === "tool") {
         start++;
       }
-      if (start < msgs.length && msgs[start].role === "assistant") {
+      if (start < msgs.length && msgs[start].role !== "user") {
         msgs.splice(start, 0, { role: "user", content: "" });
       }
-      // If first remaining is user, leave as is
+      // If first remaining is already a user, or if no messages remain, leave as is
       
       return { messages: msgs };
     }

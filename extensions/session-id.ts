@@ -17,7 +17,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join, dirname } from "node:path";
+import { join, dirname, resolve, isAbsolute } from "node:path";
 
 const PROMPT_FILE = join(homedir(), ".pi", "agent", "custom-prompt.json");
 
@@ -129,6 +129,55 @@ export default function (pi: ExtensionAPI) {
       // ── Set ─────────────────────────────────────────────────
       await saveCustomPrompt(trimmed);
       ctx.ui.notify("Custom prompt saved. It will be appended to the system prompt on the next turn.", "info");
+    },
+  });
+
+  // ── /claude command: load CLAUDE.md as custom prompt ─────────
+  pi.registerCommand("claude", {
+    description:
+      "Load a CLAUDE.md file as the custom prompt. " +
+      "Usage: /claude          (loads ./CLAUDE.md)  |  " +
+      "/claude <path>  (load a specific file)  |  " +
+      "/claude --clear (clear custom prompt)",
+    handler: async (args, ctx) => {
+      const trimmed = args.trim();
+
+      // ── Clear ───────────────────────────────────────────────
+      if (trimmed === "--clear" || trimmed === "-d") {
+        await saveCustomPrompt(null);
+        ctx.ui.notify("Custom prompt cleared.", "info");
+        return;
+      }
+
+      // ── Resolve file path ───────────────────────────────────
+      const filePath = trimmed
+        ? isAbsolute(trimmed)
+          ? trimmed
+          : resolve(ctx.cwd, trimmed)
+        : resolve(ctx.cwd, "CLAUDE.md");
+
+      // ── Read file ───────────────────────────────────────────
+      let content: string;
+      try {
+        content = await readFile(filePath, "utf-8");
+      } catch {
+        ctx.ui.notify(
+          `Cannot read file: ${filePath}`,
+          "error",
+        );
+        return;
+      }
+
+      if (!content.trim()) {
+        ctx.ui.notify(`File is empty: ${filePath}`, "warning");
+        return;
+      }
+
+      await saveCustomPrompt(content.trim());
+      ctx.ui.notify(
+        `Loaded ${filePath} (${content.trim().split("\n").length} lines) as custom prompt.`,
+        "info",
+      );
     },
   });
 }

@@ -9,7 +9,7 @@
     "system-prompt",
     "compaction"
   ],
-  "license": "MIT",
+  "license": "LGPL-3.0",
   "pi": {
     "extensions": [
       "./extensions"

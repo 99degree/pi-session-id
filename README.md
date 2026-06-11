@@ -1,34 +1,70 @@
 # pi-session-id
 
-Tiny [pi](https://github.com/earendil-works/pi-coding-agent) extension that **prepends the session ID** (followed by the full system prompt) to:
+Tiny [pi](https://github.com/earendil-works/pi-coding-agent) extension that builds the LLM prompt from up to 4 elements:
 
-1. **The system prompt** — the session ID is the very first thing the LLM sees on every turn.
-2. **Every compaction summary** — after compaction, the session ID + system prompt appear as the first content in the compacted context, ensuring the session identity survives compression.
+```
+{sessionId}          ← always present
+
+{systemPrompt}       ← pi's default system prompt
+
+{customPrompt}       ← optional, set via /prompt
+
+{claudeContent}      ← optional, loaded via /claude
+```
+
+The same 4-element header is also prepended to compaction summaries, so the full identity survives context compression.
 
 ## Install
+
+### From GitHub (recommended)
+
+```bash
+pi install git:github.com/99degree/pi-session-id
+```
+
+### From npm
 
 ```bash
 pi install npm:pi-session-id
 ```
 
-Or from a local checkout:
+### From a local checkout
+
+```bash
+git clone https://github.com/99degree/pi-session-id.git
+cd pi-session-id
+pi install .
+```
+
+### Quick test (no install)
 
 ```bash
 pi -e ./extensions/session-id.ts
 ```
 
-## What it does
+## Usage
 
-Before the extension, the LLM sees:
+Once installed, the extension runs automatically. The session ID is always prepended to the system prompt.
 
+### `/prompt` — Custom prompt (element 3)
+
+```bash
+/prompt You are an expert in Rust and systems programming.
+/prompt              # view current custom prompt
+/prompt --clear      # clear it
 ```
-You are an expert coding assistant operating inside pi...
-...
-Current date: 2026-06-11
-Current working directory: /home/user/project
+
+### `/claude` — Load CLAUDE.md (element 4)
+
+```bash
+/claude              # loads ./CLAUDE.md
+/claude path/to/file.md
+/claude --clear      # clear claude content
 ```
 
-After the extension:
+### What the LLM sees
+
+Without custom prompt or claude content:
 
 ```
 abc12345-...-xyz
@@ -39,30 +75,28 @@ Current date: 2026-06-11
 Current working directory: /home/user/project
 ```
 
-And after compaction, the first message in context becomes:
+With a custom prompt set:
 
 ```
 abc12345-...-xyz
 
-You are an expert coding assistant...
+You are an expert coding assistant operating inside pi...
 ...
-Current date: 2026-06-11
-Current working directory: /home/user/project
 
-## Goal
-[summarized conversation]
-...
+You are an expert in Rust and systems programming.
 ```
 
-The session ID acts as a persistent marker that survives compaction — it's embedded in the system prompt at the start, and re-embedded into each compaction summary so it's always present at the top of the LLM's context window.
+After compaction, the same 4-element header appears as the first content in the compacted context, followed by the summarized conversation.
 
 ## How it works
 
 | Hook | What it does |
 |------|-------------|
 | `session_start` | Captures the current session ID and base system prompt |
-| `before_agent_start` | Prepends `{sessionId}\n\n` to the system prompt for this turn |
-| `context` | If a `compactionSummary` message is present, prepends `{sessionId}\n\n{system prompt}\n\n` to its `summary` field (deep copy, no accumulation) |
+| `before_agent_start` | Builds the 4-element prompt: `{sessionId}\n\n{systemPrompt}\n\n{customPrompt}\n\n{claudeContent}` |
+| `context` | Prepends the same 4-element header to any `compactionSummary` message |
+
+Custom prompt data is persisted to `~/.pi/agent/custom-prompt.json`.
 
 ## Files
 
@@ -73,4 +107,4 @@ extensions/
 
 ## License
 
-MIT
+LGPL-3.0

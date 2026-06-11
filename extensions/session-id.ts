@@ -1,14 +1,17 @@
 /**
  * Session ID extension for pi.
  *
- * Builds the LLM prompt from up to 4 elements:
- *   1. {sessionId}        — always present
- *   2. {systemPrompt}     — pi's default system prompt
- *   3. {customPrompt}     — optional, set via /prompt
- *   4. {claudeContent}    — optional, loaded via /claude from a CLAUDE.md file
+ * Injects a user + assistant exchange at the start of every LLM call
+ * that carries the session identity and optional custom content:
  *
- * The same 4-element header is prepended to compaction summaries so the
- * full identity survives context compression.
+ *   user: (empty)
+ *   assistant: {sessionId}
+ *              {systemPrompt}
+ *              {customPrompt}   ← optional, set via /prompt
+ *              {claudeContent}  ← optional, loaded via /claude
+ *
+ * The system prompt itself is left untouched — pi's default is used.
+ * The same pair leads the compacted context after compaction.
  *
  * Custom prompt data is persisted to ~/.pi/agent/custom-prompt.json.
  */
@@ -47,12 +50,11 @@ async function saveStore(store: PromptStore): Promise<void> {
   await writeFile(STORE_FILE, JSON.stringify(store, null, 2), "utf-8");
 }
 
-// Non-empty helper
 const present = (s: string): s is string => s.trim().length > 0;
 
-// ── Prompt builder ──────────────────────────────────────────────
+// ── Build the assistant message content ─────────────────────────
 
-function buildPrompt(
+function buildAssistantContent(
   sessionId: string,
   systemPrompt: string,
   customPrompt: string,
@@ -68,6 +70,26 @@ function buildPrompt(
   return result;
 }
 
+/**
+ * Check whether the first two messages in the array are already
+ * our injected pair (empty user + assistant carrying sessionId).
+ * This avoids stacking them on every turn.
+ */
+function alreadyInjected(messages: any[], sessionId: string): boolean {
+  if (messages.length < 2) return false;
+  const [first, second] = messages;
+  if (first.role !== "user") return false;
+  if (second.role !== "assistant") return false;
+  // Check sessionId appears in the assistant content
+  const text =
+    typeof second.content === "string"
+      ? second.content
+      : Array.isArray(second.content)
+        ? second.content.map((b: any) => b.text ?? "").join("")
+        : "";
+  return text.includes(sessionId);
+}
+
 // ── Extension ───────────────────────────────────────────────────
 
 export default function (pi: ExtensionAPI) {
@@ -80,51 +102,55 @@ export default function (pi: ExtensionAPI) {
     baseSystemPrompt = ctx.getSystemPrompt();
   });
 
-  // ── Build the full 4-element prompt on every turn ─────────────
-  pi.on("before_agent_start", async (event, ctx) => {
-    const id = ctx.sessionManager.getSessionId();
-    if (!id) return;
-
-    sessionId = id;
-    baseSystemPrompt = event.systemPrompt;
-
-    const store = await loadStore();
-    return {
-      systemPrompt: buildPrompt(
-        sessionId,
-        baseSystemPrompt,
-        store.customPrompt,
-        store.claudeContent,
-      ),
-    };
-  });
-
-  // ── Prepend the 4-element header to compaction summaries ──────
-  pi.on("context", async (event, ctx) => {
+  // ── Inject the user+assistant pair before every LLM call ──────
+  pi.on("context", async (event) => {
     if (!sessionId) return;
 
-    const idx = event.messages.findIndex(
-      (m) => m.role === "compactionSummary",
+    const { messages } = event;
+
+    // If the pair is already there (from a previous turn), skip.
+    if (alreadyInjected(messages, sessionId)) return;
+
+    // For compaction summaries, wrap the info into the summary text
+    // instead of prepending extra messages.
+    const compIdx = messages.findIndex(
+      (m: any) => m.role === "compactionSummary",
     );
-    if (idx === -1) return;
+    if (compIdx !== -1) {
+      const store = await loadStore();
+      const msgs = messages.slice();
+      const comp = msgs[compIdx];
+      if (!comp.summary.startsWith(sessionId)) {
+        msgs[compIdx] = {
+          ...comp,
+          summary: `${buildAssistantContent(sessionId, baseSystemPrompt, store.customPrompt, store.claudeContent)}\n\n${comp.summary}`,
+        };
+      }
+      return { messages: msgs };
+    }
 
-    const msg = event.messages[idx];
-    if (msg.summary.startsWith(sessionId)) return;
-
+    // Normal turn: prepend empty user + session-info assistant.
     const store = await loadStore();
-    const messages = event.messages.slice();
-    messages[idx] = {
-      ...msg,
-      summary: `${buildPrompt(sessionId, baseSystemPrompt, store.customPrompt, store.claudeContent)}\n\n${msg.summary}`,
-    };
+    const info = buildAssistantContent(
+      sessionId,
+      baseSystemPrompt,
+      store.customPrompt,
+      store.claudeContent,
+    );
 
-    return { messages };
+    return {
+      messages: [
+        { role: "user", content: "" },
+        { role: "assistant", content: [{ type: "text", text: info }] },
+        ...messages,
+      ],
+    };
   });
 
-  // ── /prompt command: view / set / clear element 3 ─────────────
+  // ── /prompt command: view / set / clear custom prompt ─────────
   pi.registerCommand("prompt", {
     description:
-      "View, set, or clear the custom prompt (element 3). " +
+      "View, set, or clear the custom prompt. " +
       "Usage: /prompt <text>  |  /prompt  |  /prompt --clear",
     handler: async (args, ctx) => {
       const trimmed = args.trim();
@@ -150,14 +176,14 @@ export default function (pi: ExtensionAPI) {
       const store = await loadStore();
       store.customPrompt = trimmed;
       await saveStore(store);
-      ctx.ui.notify("Custom prompt saved (element 3).", "info");
+      ctx.ui.notify("Custom prompt saved.", "info");
     },
   });
 
-  // ── /claude command: load CLAUDE.md as element 4 ───────────────
+  // ── /claude command: load CLAUDE.md as claude content ─────────
   pi.registerCommand("claude", {
     description:
-      "Load a CLAUDE.md file as the 4th prompt element. " +
+      "Load a CLAUDE.md file as extra context. " +
       "Usage: /claude          (loads ./CLAUDE.md)  |  " +
       "/claude <path>  (load a specific file)  |  " +
       "/claude --clear (clear claude content)",
@@ -172,7 +198,6 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
-      // Resolve file path
       const filePath = trimmed
         ? isAbsolute(trimmed)
           ? trimmed
@@ -196,7 +221,7 @@ export default function (pi: ExtensionAPI) {
       store.claudeContent = content.trim();
       await saveStore(store);
       ctx.ui.notify(
-        `Loaded ${filePath} (${content.trim().split("\n").length} lines) as element 4.`,
+        `Loaded ${filePath} (${content.trim().split("\n").length} lines).`,
         "info",
       );
     },

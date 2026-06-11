@@ -1,18 +1,23 @@
 # pi-session-id
 
-Tiny [pi](https://github.com/earendil-works/pi-coding-agent) extension that builds the LLM prompt from up to 4 elements:
+Tiny [pi](https://github.com/earendil-works/pi-coding-agent) extension that injects a **user + assistant exchange** at the start of every LLM call to carry session identity and optional custom content.
+
+The system prompt itself is left untouched — pi's default is used.
+
+## What the LLM sees
 
 ```
-{sessionId}          ← always present
-
-{systemPrompt}       ← pi's default system prompt
-
-{customPrompt}       ← optional, set via /prompt
-
-{claudeContent}      ← optional, loaded via /claude
+system: (pi's default system prompt)
+user:
+assistant: {sessionId}
+           {systemPrompt}
+           {customPrompt}   ← only if set via /prompt
+           {claudeContent}  ← only if loaded via /claude
+user: (actual user message)
+...
 ```
 
-The same 4-element header is also prepended to compaction summaries, so the full identity survives context compression.
+After compaction, the same pair leads the compacted context.
 
 ## Install
 
@@ -44,57 +49,30 @@ pi -e ./extensions/session-id.ts
 
 ## Usage
 
-Once installed, the extension runs automatically. The session ID is always prepended to the system prompt.
+Once installed, the extension runs automatically. The user + assistant pair is injected on every turn.
 
-### `/prompt` — Custom prompt (element 3)
+### `/prompt` — Set custom content
 
 ```bash
 /prompt You are an expert in Rust and systems programming.
-/prompt              # view current custom prompt
-/prompt --clear      # clear it
+/prompt              # view current
+/prompt --clear      # clear
 ```
 
-### `/claude` — Load CLAUDE.md (element 4)
+### `/claude` — Load from a file
 
 ```bash
 /claude              # loads ./CLAUDE.md
 /claude path/to/file.md
-/claude --clear      # clear claude content
+/claude --clear      # clear
 ```
-
-### What the LLM sees
-
-Without custom prompt or claude content:
-
-```
-abc12345-...-xyz
-
-You are an expert coding assistant operating inside pi...
-...
-Current date: 2026-06-11
-Current working directory: /home/user/project
-```
-
-With a custom prompt set:
-
-```
-abc12345-...-xyz
-
-You are an expert coding assistant operating inside pi...
-...
-
-You are an expert in Rust and systems programming.
-```
-
-After compaction, the same 4-element header appears as the first content in the compacted context, followed by the summarized conversation.
 
 ## How it works
 
 | Hook | What it does |
 |------|-------------|
-| `session_start` | Captures the current session ID and base system prompt |
-| `before_agent_start` | Builds the 4-element prompt: `{sessionId}\n\n{systemPrompt}\n\n{customPrompt}\n\n{claudeContent}` |
-| `context` | Prepends the same 4-element header to any `compactionSummary` message |
+| `session_start` | Captures session ID and base system prompt |
+| `context` | Prepends `user: ""` + `assistant: {info}` before every LLM call (checks to avoid duplication). For compaction summaries, wraps the info into the summary text instead. |
 
 Custom prompt data is persisted to `~/.pi/agent/custom-prompt.json`.
 

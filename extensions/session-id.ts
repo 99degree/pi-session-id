@@ -126,6 +126,19 @@ export default function (pi: ExtensionAPI) {
           summary: `${buildAssistantContent(sessionId, baseSystemPrompt, store.customPrompt, store.claudeContent)}\n\n${comp.summary}`,
         };
       }
+      
+      // Fix message sequence after compactionSummary:
+      // Remove leading tool calls (they belong to summarized turns)
+      // If first remaining is assistant, insert empty user before it
+      let start = compIdx + 1;
+      while (start < msgs.length && msgs[start].role === "tool") {
+        start++;
+      }
+      if (start < msgs.length && msgs[start].role === "assistant") {
+        msgs.splice(start, 0, { role: "user", content: "" });
+      }
+      // If first remaining is user, leave as is
+      
       return { messages: msgs };
     }
 

@@ -152,15 +152,18 @@ export default function (pi: ExtensionAPI) {
       
       // Fix message sequence after compactionSummary:
       // Remove leading tool calls (they belong to summarized turns)
-      // Ensure the first remaining message is a user message
+      // Ensure a user message precedes the first remaining message (if any)
       let start = compIdx + 1;
       while (start < msgs.length && msgs[start].role === "tool") {
         start++;
       }
-      if (start < msgs.length && msgs[start].role !== "user") {
+      if (start < msgs.length) {
         msgs.splice(start, 0, { role: "user", content: "" });
+        // Debug: show first few roles after fix
+        const rolesAfter = msgs.slice(compIdx + 1, compIdx + 4).map(m => m.role);
+        ctx.ui.notify(`After fix: roles after summary: ${rolesAfter.join(", ")}`, "info");
       }
-      // If first remaining is already a user, or if no messages remain, leave as is
+      // If no messages remain after skipping tools, leave as is
       
       return { messages: msgs };
     }
@@ -175,6 +178,7 @@ export default function (pi: ExtensionAPI) {
       effectiveClaudeContent,
     );
 
+    ctx.ui.notify("Normal turn: injecting user+assistant pair", "info");
     return {
       messages: [
         { role: "user", content: "" },

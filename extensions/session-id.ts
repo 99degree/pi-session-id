@@ -146,10 +146,25 @@ export default function (pi: ExtensionAPI) {
     };
   }
 
+  // Create an assistant message with tool_result for provider validation
+  function createAssistantMsgWithToolResult(toolRole: string): any {
+    return {
+      role: "assistant",
+      content: [{
+        type: "tool_result",
+        tool_use_id: `dummy-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
+        content: [{ type: "text", text: `[Auto-generated tool result for ${toolRole}]` }],
+        is_error: true
+      }],
+    };
+  }
+
   /**
    * Fix tool-like→user violations and ensure the array starts/ends
    * with valid roles. Runs up to maxIter passes so that inserting
    * an assistant can itself create new violations (unlikely but safe).
+   * When tool-like is followed by user, insert an assistant with a
+   * tool_result to satisfy provider role sequence validation.
    */
   function fixMessageArray(messages: any[]): any[] {
     if (!messages || messages.length === 0) return messages;
@@ -162,13 +177,15 @@ export default function (pi: ExtensionAPI) {
       let insertions = 0;
       const result: any[] = [];
 
-      // Scan left-to-right: if tool-like is followed by user, insert assistant
+      // Scan left-to-right: if tool-like is followed by user, insert assistant with tool_result
       for (let i = 0; i < fixed.length; i++) {
         const msg = fixed[i];
         if (result.length > 0 &&
             !NON_TOOL_ROLES.has(result[result.length - 1].role) &&
             msg.role === "user") {
-          result.push(createAssistantMsg());
+          // Insert assistant with tool_result to satisfy: tool -> assistant(tool_result) -> user
+          const prevRole = result[result.length - 1].role;
+          result.push(createAssistantMsgWithToolResult(prevRole));
           insertions++;
         }
         result.push(msg);

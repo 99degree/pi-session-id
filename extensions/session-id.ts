@@ -159,11 +159,17 @@ export default function (pi: ExtensionAPI) {
       }
       if (start < msgs.length) {
         msgs.splice(start, 0, { role: "user", content: "" });
-        // Debug: show first few roles after fix
-        const rolesAfter = msgs.slice(compIdx + 1, compIdx + 4).map(m => m.role);
-        ctx.ui.notify(`After fix: roles after summary: ${rolesAfter.join(", ")}`, "info");
       }
       // If no messages remain after skipping tools, leave as is
+      
+      // ENSURE THE CONTEXT ENDS WITH A USER MESSAGE
+      // So the LLM will generate an assistant response (correct for chat)
+      if (msgs.length > 0) {
+        const lastMsg = msgs[msgs.length - 1];
+        if (lastMsg.role !== "user") {
+          msgs.push({ role: "user", content: "" });
+        }
+      }
       
       return { messages: msgs };
     }
@@ -178,13 +184,23 @@ export default function (pi: ExtensionAPI) {
       effectiveClaudeContent,
     );
 
-    ctx.ui.notify("Normal turn: injecting user+assistant pair", "info");
+    let resultMessages = [
+      { role: "user", content: "" },
+      { role: "assistant", content: [{ type: "text", text: info }] },
+      ...messages,
+    ];
+    
+    // ENSURE THE CONTEXT ENDS WITH A USER MESSAGE
+    // So the LLM will generate an assistant response (correct for chat)
+    if (resultMessages.length > 0) {
+      const lastMsg = resultMessages[resultMessages.length - 1];
+      if (lastMsg.role !== "user") {
+        resultMessages.push({ role: "user", content: "" });
+      }
+    }
+    
     return {
-      messages: [
-        { role: "user", content: "" },
-        { role: "assistant", content: [{ type: "text", text: info }] },
-        ...messages,
-      ],
+      messages: resultMessages,
     };
   });
 

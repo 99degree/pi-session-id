@@ -77,7 +77,7 @@ Once installed, the extension runs automatically. The user + assistant pair is i
 | Hook | What it does |
 |------|-------------|
 | `session_start` | Captures session ID and base system prompt |
-| `context` | Prepends `user: ""` + `assistant: {info}` before every LLM call (checks to avoid duplication). For compaction summaries, wraps the info into the summary text and fixes the message sequence after the summary (removes leading tool calls, inserts empty user before assistant if needed). |
+| `context` | Prepends `user: ""` + `assistant: {info}` before every LLM call (checks to avoid duplication). For compaction summaries, wraps the info into the summary text and fixes the message sequence after the summary (removes leading tool calls, ensures user message before first non-tool message). Also ensures the context ends with a user message so the LLM will generate an assistant response. |
 
 Custom prompt data is persisted to `~/.pi/agent/custom-prompt.json`.
 

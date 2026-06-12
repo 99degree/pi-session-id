@@ -147,16 +147,27 @@ export default function (pi: ExtensionAPI) {
   }
 
   // Create an assistant message with tool_result for provider validation
-  function createAssistantMsgWithToolResult(toolRole: string): any {
+  function createAssistantMsgWithToolResult(toolRole: string, toolUseId?: string): any {
     return {
       role: "assistant",
       content: [{
         type: "tool_result",
-        tool_use_id: `dummy-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
+        tool_use_id: toolUseId ?? `dummy-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
         content: [{ type: "text", text: `[Auto-generated tool result for ${toolRole}]` }],
         is_error: true
       }],
     };
+  }
+
+  // Extract tool_use_id from a tool call message
+  function extractToolUseId(msg: any): string | undefined {
+    if (!msg.content || !Array.isArray(msg.content)) return undefined;
+    for (const block of msg.content) {
+      if (block.type === "tool_use" && block.id) {
+        return block.id;
+      }
+    }
+    return undefined;
   }
 
   /**
@@ -184,8 +195,9 @@ export default function (pi: ExtensionAPI) {
             !NON_TOOL_ROLES.has(result[result.length - 1].role) &&
             msg.role === "user") {
           // Insert assistant with tool_result to satisfy: tool -> assistant(tool_result) -> user
-          const prevRole = result[result.length - 1].role;
-          result.push(createAssistantMsgWithToolResult(prevRole));
+          const prevMsg = result[result.length - 1];
+          const toolUseId = extractToolUseId(prevMsg);
+          result.push(createAssistantMsgWithToolResult(prevMsg.role, toolUseId));
           insertions++;
         }
         result.push(msg);

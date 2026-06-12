@@ -23,6 +23,8 @@ import { join, dirname, resolve, isAbsolute } from "node:path";
 
 const STORE_FILE = join(homedir(), ".pi", "agent", "custom-prompt.json");
 
+console.log("Extension loaded");
+
 // ── Storage helpers ─────────────────────────────────────────────
 
 interface PromptStore {
@@ -117,6 +119,7 @@ function alreadyInjected(messages: any[], sessionId: string): boolean {
 export default function (pi: ExtensionAPI) {
   let sessionId = "";
   let baseSystemPrompt = "";
+  let debugMode = false;  // Toggle verbose logging with /debug
 
   // ── Track session ID across session switches ──────────────────
   pi.on("session_start", async (_event, ctx) => {
@@ -124,8 +127,91 @@ export default function (pi: ExtensionAPI) {
     baseSystemPrompt = ctx.getSystemPrompt();
   });
 
+  // ── Message sequence fix ──────────────────────────────────────
+  // Roles that are NOT tool-like; anything else (tool, toolResult,
+  // bashExecution, etc.) will be treated as tool by the provider
+  // and cannot be followed by a user message.
+  const NON_TOOL_ROLES = new Set(["user", "assistant", "system", "compactionSummary"]);
+
+  // Debug logging helper - only logs if debugMode is enabled
+  const debug = (...args: any[]) => {
+    if (debugMode) console.log("[session-id]", ...args);
+  };
+
+  // Create a dummy assistant message (in provider-compatible format)
+  function createAssistantMsg(text?: string): any {
+    return {
+      role: "assistant",
+      content: [{ type: "text", text: text ?? "" }],
+    };
+  }
+
+  /**
+   * Fix tool-like→user violations and ensure the array starts/ends
+   * with valid roles. Runs up to maxIter passes so that inserting
+   * an assistant can itself create new violations (unlikely but safe).
+   */
+  function fixMessageArray(messages: any[]): any[] {
+    if (!messages || messages.length === 0) return messages;
+
+    let fixed = [...messages];
+    let totalInsertions = 0;
+    const maxIter = 10;
+
+    for (let pass = 0; pass < maxIter; pass++) {
+      let insertions = 0;
+      const result: any[] = [];
+
+      // Scan left-to-right: if tool-like is followed by user, insert assistant
+      for (let i = 0; i < fixed.length; i++) {
+        const msg = fixed[i];
+        if (result.length > 0 &&
+            !NON_TOOL_ROLES.has(result[result.length - 1].role) &&
+            msg.role === "user") {
+          result.push(createAssistantMsg());
+          insertions++;
+        }
+        result.push(msg);
+      }
+
+      if (insertions === 0) break; // no more violations
+      totalInsertions += insertions;
+      fixed = result;
+    }
+
+    // Ensure array does not end with a tool-like role
+    if (fixed.length > 0 && !NON_TOOL_ROLES.has(fixed[fixed.length - 1].role)) {
+      fixed.push(createAssistantMsg(""));
+      totalInsertions++;
+    }
+
+    // Ensure array starts with user or system
+    if (fixed.length > 0 && fixed[0].role !== "user" && fixed[0].role !== "system") {
+      fixed.unshift({ role: "user", content: "." });
+    }
+
+    // Final verification
+    let remaining = 0;
+    for (let i = 1; i < fixed.length; i++) {
+      if (!NON_TOOL_ROLES.has(fixed[i - 1].role) && fixed[i].role === "user") {
+        remaining++;
+        console.error(`[session-id] UNFIXABLE: ${fixed[i-1].role}->user at index ${i-1}`);
+      }
+    }
+
+    if (totalInsertions > 0) {
+      debug(`Fix: ${totalInsertions} assistant(s) inserted`);
+    }
+    if (remaining > 0) {
+      console.error(`[session-id] ${remaining} violations remain after fix!`);
+      debug(fixed.map((m, i) => `${i}:${m.role}`).join(" → "));
+    }
+
+    return fixed;
+  }
+
   // ── Inject the user+assistant pair before every LLM call ──────
-  pi.on("context", async (event) => {
+  pi.on("context", async (event, ctx) => {
     if (!sessionId) return;
 
     const { messages } = event;
@@ -140,7 +226,7 @@ export default function (pi: ExtensionAPI) {
     );
     if (compIdx !== -1) {
       const store = await loadStore();
-      const effectiveClaudeContent = await getEffectiveClaudeContent(store, ctx.cwd);
+      const effectiveClaudeContent = await getEffectiveClaudeContent(store, ctx?.cwd ?? process.cwd());
       const msgs = messages.slice();
       const comp = msgs[compIdx];
       if (!comp.summary.startsWith(sessionId)) {
@@ -149,59 +235,29 @@ export default function (pi: ExtensionAPI) {
           summary: `${buildAssistantContent(sessionId, baseSystemPrompt, store.customPrompt, effectiveClaudeContent)}\n\n${comp.summary}`,
         };
       }
-      
-      // Fix message sequence after compactionSummary:
-      // Remove leading tool calls (they belong to summarized turns)
-      // Ensure a user message precedes the first remaining message (if any)
-      let start = compIdx + 1;
-      while (start < msgs.length && msgs[start].role === "tool") {
-        start++;
-      }
-      if (start < msgs.length) {
-        msgs.splice(start, 0, { role: "user", content: "" });
-      }
-      // If no messages remain after skipping tools, leave as is
-      
-      // ENSURE THE CONTEXT ENDS WITH A USER MESSAGE
-      // So the LLM will generate an assistant response (correct for chat)
-      if (msgs.length > 0) {
-        const lastMsg = msgs[msgs.length - 1];
-        if (lastMsg.role !== "user") {
-          msgs.push({ role: "user", content: "" });
-        }
-      }
-      
-      return { messages: msgs };
+
+      const fixedMsgs = fixMessageArray(msgs);
+      debug(`Returning ${fixedMsgs.length} messages:`, fixedMsgs.map(m => m.role));
+      return { messages: fixedMsgs };
     }
 
     // Normal turn: prepend empty user + session-info assistant.
     const store = await loadStore();
-    const effectiveClaudeContent = await getEffectiveClaudeContent(store, ctx.cwd);
+    const effectiveClaudeContent = await getEffectiveClaudeContent(store, ctx?.cwd ?? process.cwd());
     const info = buildAssistantContent(
       sessionId,
       baseSystemPrompt,
       store.customPrompt,
       effectiveClaudeContent,
     );
-
-    let resultMessages = [
-      { role: "user", content: "" },
+    const newMessages = [
+      { role: "user", content: "." },
       { role: "assistant", content: [{ type: "text", text: info }] },
       ...messages,
     ];
-    
-    // ENSURE THE CONTEXT ENDS WITH A USER MESSAGE
-    // So the LLM will generate an assistant response (correct for chat)
-    if (resultMessages.length > 0) {
-      const lastMsg = resultMessages[resultMessages.length - 1];
-      if (lastMsg.role !== "user") {
-        resultMessages.push({ role: "user", content: "" });
-      }
-    }
-    
-    return {
-      messages: resultMessages,
-    };
+    const safeMessages = fixMessageArray(newMessages);
+    debug(`Returning ${safeMessages.length} messages:`, safeMessages.map(m => m.role));
+    return { messages: safeMessages };
   });
 
   // ── /prompt command: view / set / clear custom prompt ─────────
@@ -280,6 +336,18 @@ export default function (pi: ExtensionAPI) {
       ctx.ui.notify(
         `Loaded ${filePath} (${content.trim().split("\n").length} lines).`,
         "info",
+      );
+    },
+  });
+
+  // ── /debug command: toggle verbose logging ─────────────────────
+  pi.registerCommand("debug", {
+    description: "Toggle debug logging on/off",
+    handler: async (_args, ctx) => {
+      debugMode = !debugMode;
+      ctx.ui.notify(
+        debugMode ? "Debug logging ON" : "Debug logging OFF",
+        "info"
       );
     },
   });

@@ -180,6 +180,8 @@ export default function (pi: ExtensionAPI) {
   function fixMessageArray(messages: any[]): any[] {
     if (!messages || messages.length === 0) return messages;
 
+    debug(`fixMessageArray input: ${messages.map((m, i) => `${i}:${m.role}`).join(" -> ")}`);
+
     let fixed = [...messages];
     let totalInsertions = 0;
     const maxIter = 10;
@@ -207,6 +209,8 @@ export default function (pi: ExtensionAPI) {
       totalInsertions += insertions;
       fixed = result;
     }
+
+    debug(`fixMessageArray output: ${fixed.map((m, i) => `${i}:${m.role}`).join(" -> ")}`);
 
     // Ensure array does not end with a tool-like role
     if (fixed.length > 0 && !NON_TOOL_ROLES.has(fixed[fixed.length - 1].role)) {
@@ -244,6 +248,8 @@ export default function (pi: ExtensionAPI) {
     if (!sessionId) return;
 
     const { messages } = event;
+
+    debug(`context event received: ${messages.map((m, i) => `${i}:${m.role}`).join(" -> ")}`);
 
     // If the pair is already there (from a previous turn), skip.
     if (alreadyInjected(messages, sessionId)) return;

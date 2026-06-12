@@ -119,7 +119,7 @@ function alreadyInjected(messages: any[], sessionId: string): boolean {
 export default function (pi: ExtensionAPI) {
   let sessionId = "";
   let baseSystemPrompt = "";
-  let debugMode = false;  // Toggle verbose logging with /debug
+  let debugMode = true;  // Toggle verbose logging with /debug
 
   // ── Track session ID across session switches ──────────────────
   pi.on("session_start", async (_event, ctx) => {

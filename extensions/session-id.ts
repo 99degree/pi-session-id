@@ -2,8 +2,9 @@
  * Session ID extension for pi.
  *
  * Injects the session identity as the first message in the message array
- * for every LLM call. This ensures the session ID is always present at the start
- * of the conversation history sent to the API.
+ * only when needed:
+ * 1. For new chats (first message)
+ * 2. After compaction (when history is rebuilt)
  *
  * For Mistral models (especially Mistral Small 4), also enforces strict role constraints
  * in two key scenarios (lazy, only when needed):
@@ -86,6 +87,7 @@ export default function (pi: ExtensionAPI) {
   let debugMode = false;
   let needsRoleFix = false;
   let lastRequestFailed = false;
+  let isNewSession = true;
 
   const debug = (...args: any[]) => {
     if (debugMode) console.log("[session-id]", ...args);
@@ -93,13 +95,24 @@ export default function (pi: ExtensionAPI) {
 
   // ── Session start: capture session ID ─────────────────────────
   pi.on("session_start", async (_event: any, ctx) => {
-    sessionId = ctx.sessionManager.getSessionId() ?? "";
+    const newSessionId = ctx.sessionManager.getSessionId() ?? "";
+    
+    // Check if this is actually a new session or a resume
+    // If session ID changed, it's a new session
+    if (newSessionId !== sessionId) {
+      sessionId = newSessionId;
+      isNewSession = true;
+      debug(`New session started: ${sessionId}`);
+    } else {
+      isNewSession = false;
+      debug(`Session resumed: ${sessionId}`);
+    }
+    
     lastRequestFailed = false;
     needsRoleFix = false;
-    debug(`Session started: ${sessionId}`);
   });
 
-  // ── Inject session ID as first message in context ────────────
+  // ── Inject session ID as first message when needed ──────────
   pi.on("context", async (event: any) => {
     if (!sessionId) return;
     
@@ -112,15 +125,20 @@ export default function (pi: ExtensionAPI) {
       return text.includes(sessionId);
     });
     
-    if (hasSession) return;
-    
-    // Prepend session ID as first message
-    return {
-      messages: [
-        { role: "system", content: `Session: ${sessionId}` },
-        ...messages,
-      ]
-    };
+    // Only prepend if:
+    // 1. It's a new session, OR
+    // 2. It's after compaction (needsRoleFix is set)
+    // 3. Session ID is not already present
+    if ((isNewSession || needsRoleFix) && !hasSession) {
+      debug(`Prepending session ID to ${messages.length} messages`);
+      isNewSession = false;
+      return {
+        messages: [
+          { role: "system", content: `Session: ${sessionId}` },
+          ...messages,
+        ]
+      };
+    }
   });
 
   // ── Mistral role fix: before_provider_request (lazy) ──────────
@@ -138,12 +156,14 @@ export default function (pi: ExtensionAPI) {
     return payload;
   });
 
-  // ── Trigger role fix after compaction ────────────────────────
+  // ── Trigger role fix and session prepend after compaction ──────
   pi.on("session_compact", async (_event: any, ctx) => {
     if (ctx.model && isMistralModel(ctx.model)) {
       needsRoleFix = true;
-      debug("Compaction completed - role fix will apply on next request");
+      debug("Compaction completed - role fix + session prepend will apply on next request");
     }
+    // Also mark that we need to prepend session ID after compaction
+    isNewSession = true;
   });
 
   // ── Trigger role fix on 400 errors ────────────────────────────

@@ -250,11 +250,22 @@ function rationalizeHistoryForMistral(messages: any[]): { messages: any[]; resul
     const targetRole = role;
     const stringContent = extractText(msg.content);
 
-    // Only merge consecutive user or assistant messages, not tool messages
+    // Mistral constraint: user cannot follow tool directly; insert assistant bridge
     const lastMsg = processed[processed.length - 1];
-    if (lastMsg && lastMsg.role === targetRole && (targetRole === "user" || targetRole === "assistant")) {
-      const current = typeof lastMsg.content === "string" ? lastMsg.content : extractText(lastMsg.content);
-      lastMsg.content = `${current}\n\n[Continuation]:\n${stringContent}`;
+    if (targetRole === "user" && lastMsg && lastMsg.role === "tool") {
+      // Insert synthetic assistant acknowledgement to satisfy tool→assistant→user ordering
+      processed.push({
+        role: "assistant",
+        content: "Tool results received and processed."
+      });
+      result.consecutiveMerged++;
+    }
+
+    // Now handle the current message (re-check lastMsg because we may have inserted)
+    const updatedLastMsg = processed[processed.length - 1];
+    if (updatedLastMsg && updatedLastMsg.role === targetRole && (targetRole === "user" || targetRole === "assistant")) {
+      const current = typeof updatedLastMsg.content === "string" ? updatedLastMsg.content : extractText(updatedLastMsg.content);
+      updatedLastMsg.content = `${current}\n\n[Continuation]:\n${stringContent}`;
       result.consecutiveMerged++;
     } else {
       processed.push({ role: targetRole, content: stringContent });
@@ -305,6 +316,10 @@ function checkMistralCompliance(messages: any[]): { compliant: boolean; issues: 
     const currRole = messages[i].role.toLowerCase();
     if (prevRole === currRole && (prevRole === "user" || prevRole === "assistant")) {
       issues.push(`Consecutive '${currRole}' messages at positions ${i-1}-${i}`);
+    }
+    // Mistral constraint: user cannot follow tool directly (needs assistant bridge)
+    if (prevRole === "tool" && currRole === "user") {
+      issues.push(`Tool message at position ${i-1} cannot be directly followed by user at position ${i} — an assistant message is required between tool results and user`);
     }
   }
 

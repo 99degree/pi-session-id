@@ -162,11 +162,11 @@ function isToolMessage(msg: any): msg is ToolMessage {
 
 function ensureToolMessage(msg: any): any {
   if (msg && msg.role === "tool" && msg.tool_call_id && msg.name) {
-    return { role: "tool", content: extractText(msg.content), tool_call_id: msg.tool_call_id, name: msg.name };
+    return { role: "tool", content: toContentArray(msg.content), tool_call_id: msg.tool_call_id, name: msg.name };
   }
   if (msg && msg.role === "function") {
     // Mistral expects role "tool" not "function"
-    return { role: "tool", content: extractText(msg.content), tool_call_id: msg.tool_call_id ?? "", name: msg.name ?? "" };
+    return { role: "tool", content: toContentArray(msg.content), tool_call_id: msg.tool_call_id ?? "", name: msg.name ?? "" };
   }
   return null;
 }
@@ -177,6 +177,27 @@ function extractText(content: unknown): string {
     return content.map((b: any) => b.text ?? "").filter(Boolean).join("\n\n");
   }
   return "";
+}
+
+/**
+ * PI expects content as array of blocks: [{ type: "text", text: "..." }].
+ * This wraps a string into that format, preserving arrays as-is.
+ */
+function toContentArray(content: unknown): Array<{ type: string; text: string }> {
+  if (Array.isArray(content)) return content as Array<{ type: string; text: string }>;
+  const str = typeof content === "string" ? content : String(content ?? "");
+  return str ? [{ type: "text" as const, text: str }] : [];
+}
+
+/**
+ * Merge two content values into one text block array.
+ * Handles both string and array formats.
+ */
+function mergeContent(a: unknown, b: unknown, separator = "\n\n[Continuation]:\n"): Array<{ type: string; text: string }> {
+  const textA = extractText(a);
+  const textB = extractText(b);
+  const merged = textA + separator + textB;
+  return merged ? [{ type: "text" as const, text: merged }] : [];
 }
 
 function isMistralModel(model: { provider: string; id: string } | undefined): boolean {
@@ -217,9 +238,9 @@ function rationalizeHistoryForMistral(messages: any[]): { messages: any[]; resul
 
   result.systemMerged = systemInstructions.length;
 
-  // Push unified system prompt
+  // Push unified system prompt (array format for PI compatibility)
   if (systemInstructions.length > 0) {
-    processed.push({ role: "system", content: systemInstructions.join("\n\n") });
+    processed.push({ role: "system", content: toContentArray(systemInstructions.join("\n\n")) });
   }
 
   // Process conversational messages
@@ -230,25 +251,23 @@ function rationalizeHistoryForMistral(messages: any[]): { messages: any[]; resul
       // Preserve full tool message structure (tool_call_id, name, content)
       const toolMsg = ensureToolMessage(msg);
       if (toolMsg) {
-        // Check if last message is also a tool message (shouldn't merge)
+        // Check if last message is also a tool message (don't merge)
         const lastMsg = processed[processed.length - 1];
         if (lastMsg && lastMsg.role === "tool") {
-          // Keep both tool messages separate - don't merge them
           processed.push(toolMsg);
           result.consecutiveMerged++;
         } else {
           processed.push(toolMsg);
         }
       } else {
-        // Bare tool message without proper structure - try to preserve raw
-        processed.push({ ...msg, role: "tool", content: extractText(msg.content) });
+        // Bare tool message without proper structure - preserve original content format
+        processed.push({ ...msg, role: "tool", content: toContentArray(msg.content) });
         result.errors.push(`Tool message at index ${messages.indexOf(msg)} missing tool_call_id/name`);
       }
       continue;
     }
 
     const targetRole = role;
-    const stringContent = extractText(msg.content);
 
     // Mistral constraint: user cannot follow tool directly; insert assistant bridge
     const lastMsg = processed[processed.length - 1];
@@ -256,7 +275,7 @@ function rationalizeHistoryForMistral(messages: any[]): { messages: any[]; resul
       // Insert synthetic assistant acknowledgement to satisfy tool→assistant→user ordering
       processed.push({
         role: "assistant",
-        content: "Tool results received and processed."
+        content: toContentArray("Tool results received and processed.")
       });
       result.consecutiveMerged++;
     }
@@ -264,11 +283,10 @@ function rationalizeHistoryForMistral(messages: any[]): { messages: any[]; resul
     // Now handle the current message (re-check lastMsg because we may have inserted)
     const updatedLastMsg = processed[processed.length - 1];
     if (updatedLastMsg && updatedLastMsg.role === targetRole && (targetRole === "user" || targetRole === "assistant")) {
-      const current = typeof updatedLastMsg.content === "string" ? updatedLastMsg.content : extractText(updatedLastMsg.content);
-      updatedLastMsg.content = `${current}\n\n[Continuation]:\n${stringContent}`;
+      updatedLastMsg.content = mergeContent(updatedLastMsg.content, msg.content);
       result.consecutiveMerged++;
     } else {
-      processed.push({ role: targetRole, content: stringContent });
+      processed.push({ role: targetRole, content: toContentArray(msg.content) });
     }
   }
 
@@ -280,7 +298,7 @@ function rationalizeHistoryForMistral(messages: any[]): { messages: any[]; resul
   }
 
   if (processed.length === 1 && processed[0].role === "system") {
-    processed.push({ role: "user", content: "Execute workspace verification loop." });
+    processed.push({ role: "user", content: toContentArray("Execute workspace verification loop.") });
     result.userAdded = true;
   }
 
@@ -456,7 +474,7 @@ export default function (pi: ExtensionAPI) {
         debug(`Prepending session ID to ${messages.length} messages`);
         isNewSession = false;
         messages = [
-          { role: "system", content: `Session: ${sessionId}` },
+          { role: "system", content: toContentArray(`Session: ${sessionId}`) },
           ...messages,
         ];
       }

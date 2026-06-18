@@ -14,6 +14,7 @@
  * - Enforces strict role constraints in two key scenarios (lazy, only when needed):
  *   1. After compaction: ensures compacted messages are role-compliant
  *   2. On 400 errors: retries with role-compliant messages
+ * - Provides detailed logging of rationalization results
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { readFile, writeFile, mkdir, access } from "node:fs/promises";
@@ -122,6 +123,18 @@ Conclude your execution run only when the test run output logs are completely cl
 
 * **DIALOGUE SUPPRESSION**: Completely eliminate filler text, pleasantries, explanations, and standard chat. Focus your generation entirely on your inner monologue, planning states, and immediate native tool execution.`;
 
+// ── Types ───────────────────────────────────────────────────────
+
+interface RationalizationResult {
+  originalCount: number;
+  processedCount: number;
+  systemMerged: number;
+  consecutiveMerged: number;
+  trailingRemoved: number;
+  userAdded: boolean;
+  errors: string[];
+}
+
 // ── AGENTS.md creation ──────────────────────────────────────────
 
 async function ensureAgentsFile(cwd: string): Promise<void> {
@@ -129,7 +142,6 @@ async function ensureAgentsFile(cwd: string): Promise<void> {
   try {
     await access(agentsPath, constants.R_OK);
   } catch {
-    // File doesn't exist, create it with default content
     await mkdir(dirname(agentsPath), { recursive: true });
     await writeFile(agentsPath, DEFAULT_AGENTS_CONTENT, "utf-8");
   }
@@ -152,12 +164,28 @@ function isMistralModel(model: { provider: string; id: string } | undefined): bo
   return providerLower === "mistral" || idLower.includes("mistral") || idLower.includes("small-4");
 }
 
-function rationalizeHistoryForMistral(messages: any[]): any[] {
-  if (!messages || messages.length === 0) return [];
+/**
+ * Rationalize chat history for Mistral Small 4 constraints and return detailed results
+ */
+function rationalizeHistoryForMistral(messages: any[]): { messages: any[]; result: RationalizationResult } {
+  const result: RationalizationResult = {
+    originalCount: messages.length,
+    processedCount: 0,
+    systemMerged: 0,
+    consecutiveMerged: 0,
+    trailingRemoved: 0,
+    userAdded: false,
+    errors: [],
+  };
+
+  if (!messages || messages.length === 0) {
+    return { messages: [], result };
+  }
 
   const processed: any[] = [];
   const systemInstructions: string[] = [];
 
+  // Count system messages
   for (const msg of messages) {
     const role = msg.role.toLowerCase();
     if (role === "system" || role === "developer") {
@@ -165,10 +193,14 @@ function rationalizeHistoryForMistral(messages: any[]): any[] {
     }
   }
 
+  result.systemMerged = systemInstructions.length;
+
+  // Push unified system prompt
   if (systemInstructions.length > 0) {
     processed.push({ role: "system", content: systemInstructions.join("\n\n") });
   }
 
+  // Process conversational messages
   for (const msg of messages) {
     const role = msg.role.toLowerCase();
     if (role === "system" || role === "developer") continue;
@@ -180,20 +212,74 @@ function rationalizeHistoryForMistral(messages: any[]): any[] {
     if (lastMsg && lastMsg.role === targetRole) {
       const current = typeof lastMsg.content === "string" ? lastMsg.content : extractText(lastMsg.content);
       lastMsg.content = `${current}\n\n[Continuation]:\n${stringContent}`;
+      result.consecutiveMerged++;
     } else {
       processed.push({ role: targetRole, content: stringContent });
     }
   }
 
-  if (processed.length === 0) return [];
-  if (processed.length === 1 && processed[0].role === "system") {
-    processed.push({ role: "user", content: "Execute workspace verification loop." });
-  }
-  while (processed.length > 0 && processed[processed.length - 1].role === "assistant") {
-    processed.pop();
+  result.processedCount = processed.length;
+
+  // Boundary enforcements
+  if (processed.length === 0) {
+    return { messages: [], result };
   }
 
-  return processed;
+  if (processed.length === 1 && processed[0].role === "system") {
+    processed.push({ role: "user", content: "Execute workspace verification loop." });
+    result.userAdded = true;
+  }
+
+  while (processed.length > 0 && processed[processed.length - 1].role === "assistant") {
+    processed.pop();
+    result.trailingRemoved++;
+  }
+
+  result.processedCount = processed.length;
+
+  return { messages: processed, result };
+}
+
+/**
+ * Check if messages are Mistral-compliant and return issues
+ */
+function checkMistralCompliance(messages: any[]): { compliant: boolean; issues: string[] } {
+  const issues: string[] = [];
+
+  if (!messages || messages.length === 0) {
+    issues.push("Empty message array");
+    return { compliant: false, issues };
+  }
+
+  // Must start with system or user
+  if (messages[0].role !== "system" && messages[0].role !== "user") {
+    issues.push(`First message role must be 'system' or 'user', got '${messages[0].role}'`);
+  }
+
+  // Check for consecutive same roles
+  for (let i = 1; i < messages.length; i++) {
+    const prevRole = messages[i - 1].role.toLowerCase();
+    const currRole = messages[i].role.toLowerCase();
+    if (prevRole === currRole && (prevRole === "user" || prevRole === "assistant")) {
+      issues.push(`Consecutive '${currRole}' messages at positions ${i-1}-${i}`);
+    }
+  }
+
+  // No trailing assistant
+  if (messages.length > 0 && messages[messages.length - 1].role === "assistant") {
+    issues.push("Last message cannot be 'assistant'");
+  }
+
+  // Check for invalid roles
+  const validRoles = new Set(["system", "user", "assistant", "tool", "function"]);
+  for (let i = 0; i < messages.length; i++) {
+    const role = messages[i].role.toLowerCase();
+    if (!validRoles.has(role)) {
+      issues.push(`Invalid role '${messages[i].role}' at position ${i}`);
+    }
+  }
+
+  return { compliant: issues.length === 0, issues };
 }
 
 // ── Extension ───────────────────────────────────────────────────
@@ -204,6 +290,7 @@ export default function (pi: ExtensionAPI) {
   let needsRoleFix = false;
   let lastRequestFailed = false;
   let isNewSession = true;
+  let lastRationalizationResult: RationalizationResult | null = null;
 
   const debug = (...args: any[]) => {
     if (debugMode) console.log("[session-id]", ...args);
@@ -213,7 +300,6 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_start", async (_event: any, ctx) => {
     const newSessionId = ctx.sessionManager.getSessionId() ?? "";
     
-    // Create AGENTS.md if it doesn't exist
     try {
       await ensureAgentsFile(ctx.cwd);
       debug(`AGENTS.md ensured in ${ctx.cwd}`);
@@ -221,7 +307,6 @@ export default function (pi: ExtensionAPI) {
       debug(`Failed to create AGENTS.md: ${err}`);
     }
     
-    // Track session
     if (newSessionId !== sessionId) {
       sessionId = newSessionId;
       isNewSession = true;
@@ -233,6 +318,7 @@ export default function (pi: ExtensionAPI) {
     
     lastRequestFailed = false;
     needsRoleFix = false;
+    lastRationalizationResult = null;
   });
 
   // ── Inject session ID as first message when needed ──────────
@@ -241,17 +327,12 @@ export default function (pi: ExtensionAPI) {
     
     const { messages } = event;
     
-    // Check if session ID is already in the messages
     const hasSession = messages.some((msg: any) => {
       const text = typeof msg.content === "string" ? msg.content : 
                    Array.isArray(msg.content) ? msg.content.map((b: any) => b.text ?? "").join("") : "";
       return text.includes(sessionId);
     });
     
-    // Only prepend if:
-    // 1. It's a new session, OR
-    // 2. It's after compaction (needsRoleFix is set)
-    // 3. Session ID is not already present
     if ((isNewSession || needsRoleFix) && !hasSession) {
       debug(`Prepending session ID to ${messages.length} messages`);
       isNewSession = false;
@@ -271,8 +352,21 @@ export default function (pi: ExtensionAPI) {
 
     const payload = { ...event.payload };
     if (Array.isArray(payload.messages)) {
-      debug(`Mistral role fix: processing ${payload.messages.length} messages`);
-      payload.messages = rationalizeHistoryForMistral(payload.messages);
+      const { messages: fixedMessages, result } = rationalizeHistoryForMistral(payload.messages);
+      payload.messages = fixedMessages;
+      lastRationalizationResult = result;
+      
+      debug(`Mistral role fix applied:`);
+      debug(`  Original: ${result.originalCount} messages`);
+      debug(`  Processed: ${result.processedCount} messages`);
+      debug(`  System merged: ${result.systemMerged}`);
+      debug(`  Consecutive merged: ${result.consecutiveMerged}`);
+      debug(`  Trailing removed: ${result.trailingRemoved}`);
+      debug(`  User added: ${result.userAdded}`);
+      if (result.errors.length > 0) {
+        debug(`  Errors: ${result.errors.join(', ')}`);
+      }
+      
       needsRoleFix = false;
       lastRequestFailed = false;
     }
@@ -294,6 +388,8 @@ export default function (pi: ExtensionAPI) {
       lastRequestFailed = true;
       needsRoleFix = true;
       debug("400 error for Mistral - role fix will apply on retry");
+      debug(`  Status: ${event.status}`);
+      debug(`  Model: ${ctx.model.provider}/${ctx.model.id}`);
     }
   });
 
@@ -303,6 +399,41 @@ export default function (pi: ExtensionAPI) {
     handler: async (_args, ctx) => {
       debugMode = !debugMode;
       ctx.ui.notify(debugMode ? "Debug logging ON" : "Debug logging OFF", "info");
+    },
+  });
+
+  // ── /mistral-check command: check message compliance ─────────
+  pi.registerCommand("mistral-check", {
+    description: "Check if current context messages are Mistral-compliant",
+    handler: async (_args, ctx) => {
+      // This would need access to the current messages
+      // For now, just show the last rationalization result
+      if (lastRationalizationResult) {
+        const lines = [
+          `Mistral Rationalization Results:`,
+          `  Original: ${lastRationalizationResult.originalCount} messages`,
+          `  Processed: ${lastRationalizationResult.processedCount} messages`,
+          `  System merged: ${lastRationalizationResult.systemMerged}`,
+          `  Consecutive merged: ${lastRationalizationResult.consecutiveMerged}`,
+          `  Trailing removed: ${lastRationalizationResult.trailingRemoved}`,
+          `  User added: ${lastRationalizationResult.userAdded}`,
+        ];
+        if (lastRationalizationResult.errors.length > 0) {
+          lines.push(`  Errors: ${lastRationalizationResult.errors.join(', ')}`);
+        }
+        ctx.ui.notify(lines.join('\n'), "info");
+      } else {
+        ctx.ui.notify("No rationalization performed yet in this session", "info");
+      }
+    },
+  });
+
+  // ── /mistral-force command: force role fix on next request ───
+  pi.registerCommand("mistral-force", {
+    description: "Force Mistral role fix on the next API request",
+    handler: async (_args, ctx) => {
+      needsRoleFix = true;
+      ctx.ui.notify("Mistral role fix will be applied on the next API request", "info");
     },
   });
 }

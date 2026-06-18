@@ -349,6 +349,39 @@ function checkMistralCompliance(messages: any[]): { compliant: boolean; issues: 
   return { compliant: issues.length === 0, issues };
 }
 
+// ── Message dump for debugging ─────────────────────────────────
+
+function truncate(s: string, maxLen: number = 200): string {
+  if (!s) return "";
+  if (s.length <= maxLen) return s;
+  return s.slice(0, maxLen) + `… [truncated ${s.length - maxLen} more chars]`;
+}
+
+function dumpMessages(label: string, messages: any[], enabled: boolean = false): void {
+  if (!enabled) return;
+  const lines: string[] = [
+    `╔══ [${label}] ${messages.length} messages ─────────────────`,
+  ];
+  for (let i = 0; i < messages.length; i++) {
+    const m = messages[i];
+    const role = m.role ?? "???";
+    let extra = "";
+    if (role === "tool" || (m.tool_call_id && m.name)) {
+      extra = `  tool_call_id=${m.tool_call_id ?? "?"}  name=${m.name ?? "?"}`;
+    }
+    if (role === "assistant" && m.tool_calls && m.tool_calls.length > 0) {
+      extra = `  tool_calls=[${m.tool_calls.map((tc: any) => tc.function?.name ?? tc.id ?? "?").join(", ")}]`;
+    }
+    const content = truncate(typeof m.content === "string" ? m.content : JSON.stringify(m.content), 150);
+    lines.push(`  │ [${i}] role=${role}${extra ? "  " + extra : ""}`);
+    if (content) {
+      lines.push(`  │     content="${content}"`);
+    }
+  }
+  lines.push(`  └───────────────────────────────────────────────────`);
+  console.log("[session-id] " + lines.join("\n[session-id] "));
+}
+
 // ── Extension ───────────────────────────────────────────────────
 
 export default function (pi: ExtensionAPI) {
@@ -418,10 +451,16 @@ export default function (pi: ExtensionAPI) {
 
     const payload = { ...event.payload };
     if (Array.isArray(payload.messages)) {
+      // Dump original messages before fix
+      dumpMessages(`BEFORE_FIX (${event.model.provider}/${event.model.id})`, payload.messages, debugMode);
+
       const { messages: fixedMessages, result } = rationalizeHistoryForMistral(payload.messages);
       payload.messages = fixedMessages;
       lastRationalizationResult = result;
       
+      // Dump fixed messages after fix
+      dumpMessages(`AFTER_FIX (${event.model.provider}/${event.model.id})`, payload.messages, debugMode);
+
       if (result.originalCount !== result.processedCount || result.systemMerged > 0 || result.consecutiveMerged > 0 || result.trailingRemoved > 0 || result.userAdded || result.errors.length > 0) {
         debug(`Mistral role fix applied on request to ${event.model.provider}/${event.model.id}:`);
         debug(`  Original: ${result.originalCount} messages`);
@@ -455,9 +494,25 @@ export default function (pi: ExtensionAPI) {
     if (event.status === 400 && ctx.model && isMistralModel(ctx.model)) {
       lastRequestFailed = true;
       needsRoleFix = true;
-      debug("400 error for Mistral - role fix will apply on retry");
-      debug(`  Status: ${event.status}`);
-      debug(`  Model: ${ctx.model.provider}/${ctx.model.id}`);
+      
+      // Dump error details for analysis
+      console.log("[session-id] ╔══ 400 ERROR from Mistral ──────────────────────────────");
+      console.log(`[session-id]   Model: ${ctx.model.provider}/${ctx.model.id}`);
+      console.log(`[session-id]   Status: ${event.status}`);
+      if (event.body && typeof event.body === "object") {
+        const body = event.body as any;
+        console.log(`[session-id]   Error: ${body.error?.message ?? body.message ?? JSON.stringify(body).slice(0, 500)}`);
+        console.log(`[session-id]   Type: ${body.error?.type ?? body.type ?? "N/A"}`);
+      } else if (typeof event.body === "string") {
+        console.log(`[session-id]   Body: ${event.body.slice(0, 500)}`);
+      }
+      
+      // Dump the messages that were sent (from last rationalization result)
+      if (lastRationalizationResult) {
+        console.log(`[session-id]   Rationalization: ${lastRationalizationResult.originalCount}→${lastRationalizationResult.processedCount}`);
+      }
+      console.log("[session-id]   Role fix will apply on retry");
+      console.log("[session-id] └────────────────────────────────────────────────────────");
     }
   });
 
@@ -526,6 +581,34 @@ export default function (pi: ExtensionAPI) {
         ctx.ui.notify(lines.join('\n'), "info");
       } else {
         ctx.ui.notify("Mistral fix flag is set. Role rationalization runs automatically on every Mistral request.", "info");
+      }
+    },
+  });
+
+  // ── /mistral-dump command: dump last rationalization for analysis ──
+  pi.registerCommand("mistral-dump", {
+    description: "Dump the last Mistral rationalization details (use /debug to see full message dump on next request)",
+    handler: async (_args, ctx) => {
+      if (lastRationalizationResult) {
+        const lines = [
+          `╔══ Last Mistral Rationalization ──────────────────`,
+          `  Original: ${lastRationalizationResult.originalCount} messages`,
+          `  Processed: ${lastRationalizationResult.processedCount} messages`,
+          `  System merged: ${lastRationalizationResult.systemMerged}`,
+          `  Consecutive merged: ${lastRationalizationResult.consecutiveMerged}`,
+          `  Trailing removed: ${lastRationalizationResult.trailingRemoved}`,
+          `  User added: ${lastRationalizationResult.userAdded}`,
+        ];
+        if (lastRationalizationResult.errors.length > 0) {
+          lines.push(`  Errors: ${lastRationalizationResult.errors.join('; ')}`);
+        }
+        lines.push(`  ─────────────────────────────────────────────`);
+        lines.push(`  Run /debug to toggle debug mode,`);
+        lines.push(`  then send a message to see full message dump.`);
+        lines.push(`  └────────────────────────────────────────────`);
+        ctx.ui.notify(lines.join('\n'), "info");
+      } else {
+        ctx.ui.notify("No rationalization performed yet. Send a Mistral request first.", "info");
       }
     },
   });

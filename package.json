@@ -1,7 +1,7 @@
 {
   "name": "pi-session-id",
   "version": "1.0.0",
-  "description": "pi extension that prepends the session ID to the system prompt and compaction summaries",
+  "description": "pi extension that creates AGENTS.md with default prompt, injects session ID, and fixes Mistral role issues",
   "keywords": [
     "pi-package",
     "pi-extension",
@@ -13,9 +13,6 @@
   "pi": {
     "extensions": [
       "./extensions"
-    ],
-    "prompts": [
-      "./prompts"
     ]
   },
   "dependencies": {

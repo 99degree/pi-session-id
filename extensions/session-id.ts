@@ -1,61 +1,22 @@
 /**
  * Session ID extension for pi.
  *
- * 1. Creates/updates AGENTS.md with session identity at session start.
- *    Pi automatically loads AGENTS.md as a context file and includes it
- *    in the system prompt for every API request, so the session ID is always present.
+ * Injects the session identity as the first message in the message array
+ * for every LLM call. This ensures the session ID is always present at the start
+ * of the conversation history sent to the API.
  *
- * 2. For Mistral models (especially Mistral Small 4), enforces strict role constraints
- *    in two key scenarios (lazy, only when needed):
- *    - After compaction: ensures compacted messages are role-compliant
- *    - On 400 errors: retries with role-compliant messages
+ * For Mistral models (especially Mistral Small 4), also enforces strict role constraints
+ * in two key scenarios (lazy, only when needed):
+ * 1. After compaction: ensures compacted messages are role-compliant
+ * 2. On 400 errors: retries with role-compliant messages
  *
  * Role constraints enforced when applied:
  * - Strict alternation between user and assistant
  * - Only allowed roles: system, user, assistant, tool
  * - System message must be first (index 0)
  * - No trailing assistant messages
- * - System messages contain only text (no images)
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { readFile, writeFile, mkdir, access } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
-import { constants } from "node:fs";
-
-const AGENTS_FILE = "AGENTS.md";
-
-// ── AGENTS.md management ────────────────────────────────────────
-
-/**
- * Build AGENTS.md content with session identity
- */
-function buildAgentsContent(sessionId: string, existingContent: string = ""): string {
-  const header = `# Session: ${sessionId}\n\n`;
-  if (existingContent && !existingContent.includes(`# Session: ${sessionId}`)) {
-    return header + existingContent;
-  }
-  return header + (existingContent || "");
-}
-
-/**
- * Ensure AGENTS.md exists with session identity.
- * Pi will automatically load this as a context file.
- */
-async function ensureAgentsFile(cwd: string, sessionId: string): Promise<void> {
-  const agentsPath = resolve(cwd, AGENTS_FILE);
-  try {
-    await access(agentsPath, constants.R_OK);
-    const existing = await readFile(agentsPath, "utf-8");
-    const sessionMatch = existing.match(/^# Session: ([^\n]+)/m);
-    const currentSessionId = sessionMatch ? sessionMatch[1] : null;
-    if (!currentSessionId || currentSessionId !== sessionId) {
-      await writeFile(agentsPath, buildAgentsContent(sessionId, existing), "utf-8");
-    }
-  } catch {
-    await mkdir(dirname(agentsPath), { recursive: true });
-    await writeFile(agentsPath, buildAgentsContent(sessionId), "utf-8");
-  }
-}
 
 // ── Mistral role rationalization ─────────────────────────────────
 
@@ -130,20 +91,36 @@ export default function (pi: ExtensionAPI) {
     if (debugMode) console.log("[session-id]", ...args);
   };
 
-  // ── Session start: ensure AGENTS.md has session ID ────────────
+  // ── Session start: capture session ID ─────────────────────────
   pi.on("session_start", async (_event: any, ctx) => {
     sessionId = ctx.sessionManager.getSessionId() ?? "";
     lastRequestFailed = false;
     needsRoleFix = false;
+    debug(`Session started: ${sessionId}`);
+  });
 
-    if (sessionId) {
-      try {
-        await ensureAgentsFile(ctx.cwd, sessionId);
-        debug(`AGENTS.md updated with session: ${sessionId}`);
-      } catch (err) {
-        debug(`Failed to update AGENTS.md: ${err}`);
-      }
-    }
+  // ── Inject session ID as first message in context ────────────
+  pi.on("context", async (event: any) => {
+    if (!sessionId) return;
+    
+    const { messages } = event;
+    
+    // Check if session ID is already in the messages
+    const hasSession = messages.some((msg: any) => {
+      const text = typeof msg.content === "string" ? msg.content : 
+                   Array.isArray(msg.content) ? msg.content.map((b: any) => b.text ?? "").join("") : "";
+      return text.includes(sessionId);
+    });
+    
+    if (hasSession) return;
+    
+    // Prepend session ID as first message
+    return {
+      messages: [
+        { role: "system", content: `Session: ${sessionId}` },
+        ...messages,
+      ]
+    };
   });
 
   // ── Mistral role fix: before_provider_request (lazy) ──────────
@@ -153,7 +130,7 @@ export default function (pi: ExtensionAPI) {
 
     const payload = { ...event.payload };
     if (Array.isArray(payload.messages)) {
-      debug(`Mistral role fix: ${payload.messages.length} -> ${payload.messages.length} messages`);
+      debug(`Mistral role fix: processing ${payload.messages.length} messages`);
       payload.messages = rationalizeHistoryForMistral(payload.messages);
       needsRoleFix = false;
       lastRequestFailed = false;

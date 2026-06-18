@@ -421,28 +421,48 @@ export default function (pi: ExtensionAPI) {
     lastRationalizationResult = null;
   });
 
-  // ── Inject session ID as first message when needed ──────────
+  // ── Apply Mistral role fix and inject session ID ────────────
   pi.on("context", async (event: any) => {
-    if (!sessionId) return;
+    // Step 1: Always apply Mistral-compatible role rationalization
+    // (catches cases where before_provider_request doesn't fire, e.g. non-Mistral
+    //  provider or API calls made outside PI's provider pipeline)
+    let messages = event.messages;
     
-    const { messages } = event;
+    if (messages && Array.isArray(messages) && messages.length > 0) {
+      const { messages: fixedMessages, result } = rationalizeHistoryForMistral(messages);
+      lastRationalizationResult = result;
+      messages = fixedMessages;
+      
+      if (result.originalCount !== result.processedCount || result.systemMerged > 0 || result.consecutiveMerged > 0 || result.trailingRemoved > 0 || result.userAdded || result.errors.length > 0) {
+        console.log(`[session-id] context: Mistral role fix applied:`);
+        console.log(`[session-id]   Original: ${result.originalCount} → Processed: ${result.processedCount}`);
+        console.log(`[session-id]   System merged: ${result.systemMerged}, Consecutive merged: ${result.consecutiveMerged}`);
+        console.log(`[session-id]   Trailing removed: ${result.trailingRemoved}, User added: ${result.userAdded}`);
+        if (result.errors.length > 0) {
+          console.log(`[session-id]   Errors: ${result.errors.join('; ')}`);
+        }
+      }
+    }
     
-    const hasSession = messages.some((msg: any) => {
-      const text = typeof msg.content === "string" ? msg.content : 
-                   Array.isArray(msg.content) ? msg.content.map((b: any) => b.text ?? "").join("") : "";
-      return text.includes(sessionId);
-    });
-    
-    if ((isNewSession || needsRoleFix) && !hasSession) {
-      debug(`Prepending session ID to ${messages.length} messages`);
-      isNewSession = false;
-      return {
-        messages: [
+    // Step 2: Inject session ID if needed (on rationalized messages)
+    if (sessionId && messages) {
+      const hasSession = messages.some((msg: any) => {
+        const text = typeof msg.content === "string" ? msg.content : 
+                     Array.isArray(msg.content) ? msg.content.map((b: any) => b.text ?? "").join("") : "";
+        return text.includes(sessionId);
+      });
+      
+      if ((isNewSession || needsRoleFix) && !hasSession) {
+        debug(`Prepending session ID to ${messages.length} messages`);
+        isNewSession = false;
+        messages = [
           { role: "system", content: `Session: ${sessionId}` },
           ...messages,
-        ]
-      };
+        ];
+      }
     }
+    
+    return { messages };
   });
 
   // ── Mistral role fix: before_provider_request (always for Mistral models) ──

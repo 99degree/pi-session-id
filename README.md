@@ -1,6 +1,6 @@
 # pi-session-id
 
-Tiny [pi](https://github.com/earendil-works/pi-coding-agent) extension that injects a **user + assistant exchange** at the start of every LLM call to carry session identity and optional custom content, and ensures valid message sequences after compaction.
+Small [pi](https://github.com/earendil-works/pi-coding-agent) extension that injects a **user + assistant exchange** at the start of every LLM call to carry session identity and optional custom content, and ensures valid message sequences after compaction.
 
 The system prompt itself is left untouched — pi's default is used.
 

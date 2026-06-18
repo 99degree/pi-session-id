@@ -1,23 +1,55 @@
 /**
  * Session ID extension for pi.
  *
- * Injects the session identity as the first message in the message array
- * only when needed:
- * 1. For new chats (first message)
- * 2. After compaction (when history is rebuilt)
+ * On startup:
+ * - Creates AGENTS.md with default engineering prompt if it doesn't exist
  *
- * For Mistral models (especially Mistral Small 4), also enforces strict role constraints
- * in two key scenarios (lazy, only when needed):
- * 1. After compaction: ensures compacted messages are role-compliant
- * 2. On 400 errors: retries with role-compliant messages
+ * For every LLM call:
+ * - Injects the session identity as the first message in the message array
+ *   only when needed:
+ *   1. For new chats (first message)
+ *   2. After compaction (when history is rebuilt)
  *
- * Role constraints enforced when applied:
- * - Strict alternation between user and assistant
- * - Only allowed roles: system, user, assistant, tool
- * - System message must be first (index 0)
- * - No trailing assistant messages
+ * For Mistral models (especially Mistral Small 4):
+ * - Enforces strict role constraints in two key scenarios (lazy, only when needed):
+ *   1. After compaction: ensures compacted messages are role-compliant
+ *   2. On 400 errors: retries with role-compliant messages
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { readFile, writeFile, mkdir, access } from "node:fs/promises";
+import { dirname, resolve } from "node:path";
+import { constants } from "node:fs";
+
+const AGENTS_FILE = "AGENTS.md";
+
+const DEFAULT_AGENTS_CONTENT = `You are an autonomous engineering agent executing via the Pi harness. Your goal is complete task success verified through tool execution.
+
+CRITICAL OPERATIONAL LOOP:
+1. INSPECT FIRST: Always invoke the \`bash\` tool to view/read file contents or structure before editing. Never assume layouts.
+2. PRESERVE LAYOUT: Match existing file indentation (spaces vs tabs), depth, trailing commas, and file-ending newlines exactly.
+3. DIRECT MODIFICATION: Execute structural code modifications directly on the requested file paths via the provided file manipulation tools or \`bash\` workflows. Do not create /tmp or scratch directories.
+4. MANDATORY VERIFICATION: Immediately after saving any changes to a file, invoke the \`bash\` tool to run the build, test, compilation, or validation commands for the environment.
+5. SELF-CORRECT: If your verification commands return errors or a non-zero exit code, analyze stderr, resolve syntax/logic flaws, and re-run your testing commands. Loop until the verification succeeds with exit code 0.
+
+NATIVE TOOL EXECUTION RULES:
+- NO RAW CODE IN CHAT: You are strictly forbidden from dumping raw code, unified diffs, or markdown code snippets (like \`\`\`python or \`\`\`text) into standard chat blocks.
+- EXECUTION MANDATE: Every single file update and terminal instruction must happen exclusively through native LLM tool calls. Text-based code simulations break the parsing framework.
+- DIALOGUE SUPPRESSION: Suppress standard conversational chatter. Focus your generation entirely on planning and immediate tool execution.
+
+Trigger your native function-calling interface immediately to execute the next logical step. Do not write filler text.`;
+
+// ── AGENTS.md creation ──────────────────────────────────────────
+
+async function ensureAgentsFile(cwd: string): Promise<void> {
+  const agentsPath = resolve(cwd, AGENTS_FILE);
+  try {
+    await access(agentsPath, constants.R_OK);
+  } catch {
+    // File doesn't exist, create it with default content
+    await mkdir(dirname(agentsPath), { recursive: true });
+    await writeFile(agentsPath, DEFAULT_AGENTS_CONTENT, "utf-8");
+  }
+}
 
 // ── Mistral role rationalization ─────────────────────────────────
 
@@ -93,12 +125,19 @@ export default function (pi: ExtensionAPI) {
     if (debugMode) console.log("[session-id]", ...args);
   };
 
-  // ── Session start: capture session ID ─────────────────────────
+  // ── Session start: create AGENTS.md and capture session ID ────
   pi.on("session_start", async (_event: any, ctx) => {
     const newSessionId = ctx.sessionManager.getSessionId() ?? "";
     
-    // Check if this is actually a new session or a resume
-    // If session ID changed, it's a new session
+    // Create AGENTS.md if it doesn't exist
+    try {
+      await ensureAgentsFile(ctx.cwd);
+      debug(`AGENTS.md ensured in ${ctx.cwd}`);
+    } catch (err) {
+      debug(`Failed to create AGENTS.md: ${err}`);
+    }
+    
+    // Track session
     if (newSessionId !== sessionId) {
       sessionId = newSessionId;
       isNewSession = true;
@@ -162,7 +201,6 @@ export default function (pi: ExtensionAPI) {
       needsRoleFix = true;
       debug("Compaction completed - role fix + session prepend will apply on next request");
     }
-    // Also mark that we need to prepend session ID after compaction
     isNewSession = true;
   });
 

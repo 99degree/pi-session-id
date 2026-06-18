@@ -452,12 +452,12 @@ export default function (pi: ExtensionAPI) {
       messages = fixedMessages;
       
       if (result.originalCount !== result.processedCount || result.systemMerged > 0 || result.consecutiveMerged > 0 || result.trailingRemoved > 0 || result.userAdded || result.errors.length > 0) {
-        console.log(`[session-id] context: Mistral role fix applied:`);
-        console.log(`[session-id]   Original: ${result.originalCount} → Processed: ${result.processedCount}`);
-        console.log(`[session-id]   System merged: ${result.systemMerged}, Consecutive merged: ${result.consecutiveMerged}`);
-        console.log(`[session-id]   Trailing removed: ${result.trailingRemoved}, User added: ${result.userAdded}`);
+        debug(`context: Mistral role fix applied:`);
+        debug(`  Original: ${result.originalCount} → Processed: ${result.processedCount}`);
+        debug(`  System merged: ${result.systemMerged}, Consecutive merged: ${result.consecutiveMerged}`);
+        debug(`  Trailing removed: ${result.trailingRemoved}, User added: ${result.userAdded}`);
         if (result.errors.length > 0) {
-          console.log(`[session-id]   Errors: ${result.errors.join('; ')}`);
+          debug(`  Errors: ${result.errors.join('; ')}`);
         }
       }
     }
@@ -533,24 +533,22 @@ export default function (pi: ExtensionAPI) {
       lastRequestFailed = true;
       needsRoleFix = true;
       
-      // Dump error details for analysis
-      console.log("[session-id] ╔══ 400 ERROR from Mistral ──────────────────────────────");
-      console.log(`[session-id]   Model: ${ctx.model.provider}/${ctx.model.id}`);
-      console.log(`[session-id]   Status: ${event.status}`);
+      debug("╔══ 400 ERROR from Mistral ──────────────────────────────");
+      debug(`  Model: ${ctx.model.provider}/${ctx.model.id}`);
+      debug(`  Status: ${event.status}`);
       if (event.body && typeof event.body === "object") {
         const body = event.body as any;
-        console.log(`[session-id]   Error: ${body.error?.message ?? body.message ?? JSON.stringify(body).slice(0, 500)}`);
-        console.log(`[session-id]   Type: ${body.error?.type ?? body.type ?? "N/A"}`);
+        debug(`  Error: ${body.error?.message ?? body.message ?? JSON.stringify(body).slice(0, 500)}`);
+        debug(`  Type: ${body.error?.type ?? body.type ?? "N/A"}`);
       } else if (typeof event.body === "string") {
-        console.log(`[session-id]   Body: ${event.body.slice(0, 500)}`);
+        debug(`  Body: ${event.body.slice(0, 500)}`);
       }
       
-      // Dump the messages that were sent (from last rationalization result)
       if (lastRationalizationResult) {
-        console.log(`[session-id]   Rationalization: ${lastRationalizationResult.originalCount}→${lastRationalizationResult.processedCount}`);
+        debug(`  Rationalization: ${lastRationalizationResult.originalCount}→${lastRationalizationResult.processedCount}`);
       }
-      console.log("[session-id]   Role fix will apply on retry");
-      console.log("[session-id] └────────────────────────────────────────────────────────");
+      debug("  Role fix will apply on retry");
+      debug("└────────────────────────────────────────────────────────");
     }
   });
 
